@@ -23,6 +23,9 @@ const userSchema = new mongoose.Schema(
       backupCodes: { type: [String], select: false },
     },
 
+    passwordResetTokenHash: { type: String, select: false },
+    passwordResetExpires: { type: Date, select: false },
+
     role: { type: String, enum: ["user", "agent_admin"], default: "user" },
   },
   { timestamps: true }
