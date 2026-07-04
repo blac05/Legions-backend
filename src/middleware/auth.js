@@ -26,3 +26,20 @@ export function requireRole(...roles) {
     next();
   };
 }
+// Add this to the bottom of src/middleware/auth.js
+export function requireVerifiedEmail(req, res, next) {
+  // requireAuth must run before this to populate req.user
+  if (!req.user) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+
+  // Check the email verification flag from your User Model
+  if (!req.user.emailVerified) {
+    return res.status(403).json({ 
+      error: "Your email address must be verified to perform this action.",
+      requiresVerification: true 
+    });
+  }
+
+  next();
+}
