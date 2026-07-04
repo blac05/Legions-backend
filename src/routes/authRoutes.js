@@ -1,17 +1,32 @@
 import express from "express";
 import multer from "multer";
+import rateLimit from "express-rate-limit";
 import { requireAuth } from "../middleware/auth.js";
 import {
   register, login, me, submitKyc, kycWebhook,
-  setupTwoFA, verifyAndEnableTwoFA, challengeTwoFA,
+  setupTwoFA, verifyAndEnableTwoFA, challengeTwoFA, regenerateBackupCodes,
+  forgotPassword, resetPassword, verifyEmail, resendVerificationEmail,
 } from "../controllers/authController.js";
 
 const upload = multer({ dest: "uploads/" });
 const router = express.Router();
 
-router.post("/register", register);
-router.post("/login", login);
+const credentialLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many attempts. Please wait a few minutes and try again." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post("/register", credentialLimiter, register);
+router.post("/login", credentialLimiter, login);
+router.post("/password/forgot", credentialLimiter, forgotPassword);
+router.post("/password/reset", credentialLimiter, resetPassword);
+router.post("/email/verify", credentialLimiter, verifyEmail);
+
 router.get("/me", requireAuth, me);
+router.post("/email/resend", requireAuth, credentialLimiter, resendVerificationEmail);
 
 router.post("/kyc", requireAuth, upload.single("document"), submitKyc);
 router.post("/kyc/webhook", kycWebhook); // called by your KYC provider, not the frontend
@@ -19,5 +34,6 @@ router.post("/kyc/webhook", kycWebhook); // called by your KYC provider, not the
 router.post("/2fa/setup", requireAuth, setupTwoFA);
 router.post("/2fa/verify", requireAuth, verifyAndEnableTwoFA);
 router.post("/2fa/challenge", requireAuth, challengeTwoFA);
+router.post("/2fa/backup-codes/regenerate", requireAuth, regenerateBackupCodes);
 
 export default router;
