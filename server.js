@@ -29,6 +29,8 @@ app.post("/api/payments/stripe/webhook", express.raw({ type: "application/json" 
 app.use(express.json({ limit: "2mb" }));
 app.use(mongoSanitize());
 
+// General API limiter. Auth routes (login/register/password reset) have their own,
+// stricter limiter defined in authRoutes.js since they're the main brute-force surface.
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
 app.use("/api", limiter);
 
@@ -43,25 +45,6 @@ app.use(notFound);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-
-connectDB().then(() => {
-  // If we are on Render, it provides a PORT automatically. 
-  // If we are local, we wrap it in a try/catch to gracefully catch port conflicts.
-  try {
-    app.listen(PORT, () => {
-      console.log(`[legion] API Server listening on port ${PORT}`);
-      startBreachMonitor();
-    });
-  } catch (err) {
-    if (err.code === 'EADDRINUSE') {
-      console.log(`[legion] Port ${PORT} locked locally. Falling back to portless worker mode.`);
-      startBreachMonitor();
-      setInterval(() => {}, 1 << 30);
-    } else {
-      throw err;
-    }
-  }
-});
 
 connectDB().then(() => {
   app.listen(PORT, () => {
