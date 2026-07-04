@@ -1,8 +1,8 @@
 import Dispute from "../models/Dispute.js";
 import Escrow from "../models/Escrow.js";
-import { createPayout } from "./paymentController.js";
+import { createPayout, createSplitPayout } from "./paymentController.js";
 
-// GET /api/disputes  (agent_admin only) - full queue for the ops console
+// GET /api/disputes  (agent_admin only)
 export async function listDisputes(req, res) {
   const { status } = req.query;
   const filter = status ? { status } : {};
@@ -10,7 +10,7 @@ export async function listDisputes(req, res) {
   res.json({ disputes });
 }
 
-// GET /api/disputes/mine - disputes on contracts the current user is part of
+// GET /api/disputes/mine
 export async function listMyDisputes(req, res) {
   const myEscrows = await Escrow.find({
     $or: [{ "depositor.user": req.user._id }, { "beneficiary.user": req.user._id }],
@@ -21,13 +21,20 @@ export async function listMyDisputes(req, res) {
   res.json({ disputes });
 }
 
-// POST /api/disputes/:id/resolve  (agent_admin only)  { resolution, notes }
-// resolution: "release_to_beneficiary" | "refund_depositor" | "split"
+// POST /api/disputes/:id/resolve  (agent_admin only)
+// body: { resolution: "release_to_beneficiary" | "refund_depositor" | "split", notes, splitPercent }
+// splitPercent (0-100) is the share that goes to the beneficiary; only used when resolution === "split".
 // Applies to all currently-unreleased milestones on the contract.
 export async function resolveDispute(req, res) {
-  const { resolution, notes } = req.body;
+  const { resolution, notes, splitPercent } = req.body;
   if (!["release_to_beneficiary", "refund_depositor", "split"].includes(resolution)) {
     return res.status(400).json({ error: "Invalid resolution type" });
+  }
+  if (resolution === "split") {
+    const pct = Number(splitPercent);
+    if (Number.isNaN(pct) || pct < 0 || pct > 100) {
+      return res.status(400).json({ error: "splitPercent must be a number between 0 and 100" });
+    }
   }
 
   const dispute = await Dispute.findById(req.params.id).populate("escrow");
@@ -53,11 +60,18 @@ export async function resolveDispute(req, res) {
     escrow.status = escrow.milestones.every((m) => m.released) ? "completed" : "active";
   } else if (resolution === "refund_depositor") {
     escrow.status = "refunded";
-    // TODO: trigger a refund of unreleased milestone totals back to the depositor's funding method
+    // TODO: trigger an actual refund of the unreleased milestone totals through
+    // whichever provider handled the deposit (Stripe refund, bank reversal, etc).
   } else {
-    // split: agent decides a partial release per resolutionNotes; left for manual/admin follow-up
-    escrow.status = "active";
-    // TODO: parse resolutionNotes for a per-milestone split and trigger partial payouts
+    // split: divide each unreleased milestone between beneficiary and depositor.
+    const pct = Number(splitPercent);
+    for (const m of unreleased) {
+      await createSplitPayout(escrow, m, pct);
+      m.released = true;
+      m.releasedAt = new Date();
+      m.splitPercent = pct;
+    }
+    escrow.status = escrow.milestones.every((m) => m.released) ? "completed" : "active";
   }
   await escrow.save();
 

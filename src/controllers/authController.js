@@ -1,7 +1,9 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import User from "../models/User.js";
 import { generateTwoFASecret, generateQRCode, verifyTwoFAToken, generateBackupCodes } from "../utils/twoFactor.js";
+import { sendPasswordResetEmail } from "../utils/email.js";
 
 function signToken(userId) {
   return jwt.sign({ sub: userId }, process.env.JWT_SECRET, {
@@ -30,7 +32,7 @@ export async function register(req, res) {
   const passwordHash = await bcrypt.hash(password, 12);
   const user = await User.create({
     fullName, email, phone, passwordHash,
-    role: isAdminEmail(email) ? "agent_admin" : "user", // see ADMIN_EMAILS in .env - grants access to the dispute console
+    role: isAdminEmail(email) ? "agent_admin" : "user",
   });
 
   const token = signToken(user._id);
@@ -63,6 +65,61 @@ export async function me(req, res) {
   res.json({ user: req.user.toSafeJSON() });
 }
 
+// POST /api/auth/password/forgot  { email }
+// Always responds the same way whether or not the email exists, to avoid leaking
+// which emails are registered.
+export async function forgotPassword(req, res) {
+  const { email } = req.body;
+  const genericResponse = { message: "If an account exists for that email, a reset link has been sent." };
+  if (!email) return res.json(genericResponse);
+
+  const user = await User.findOne({ email: email.toLowerCase() });
+  if (!user) return res.json(genericResponse);
+
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  user.passwordResetTokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  user.passwordResetExpires = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+  await user.save();
+
+  const resetUrl = `${process.env.CLIENT_URL || "http://localhost:5173"}/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+  await sendPasswordResetEmail(user, resetUrl);
+
+  const response = { ...genericResponse };
+  if (process.env.NODE_ENV !== "production") {
+    // Convenience for local/dev testing only, since no real email provider is connected yet.
+    response.devResetToken = rawToken;
+    response.devResetUrl = resetUrl;
+  }
+  res.json(response);
+}
+
+// POST /api/auth/password/reset  { email, token, password }
+export async function resetPassword(req, res) {
+  const { email, token, password } = req.body;
+  if (!email || !token || !password) {
+    return res.status(400).json({ error: "Email, token and new password are required" });
+  }
+  if (password.length < 10) {
+    return res.status(400).json({ error: "Password must be at least 10 characters" });
+  }
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const user = await User.findOne({
+    email: email.toLowerCase(),
+    passwordResetTokenHash: tokenHash,
+    passwordResetExpires: { $gt: new Date() },
+  }).select("+passwordResetTokenHash +passwordResetExpires");
+
+  if (!user) return res.status(400).json({ error: "This reset link is invalid or has expired" });
+
+  user.passwordHash = await bcrypt.hash(password, 12);
+  user.passwordResetTokenHash = undefined;
+  user.passwordResetExpires = undefined;
+  await user.save();
+
+  res.json({ message: "Password updated. You can now log in with your new password." });
+}
+
 // POST /api/auth/kyc  (multipart form: idType, country, document)
 // In production, swap this for a call to a licensed KYC/AML provider
 // (e.g. Persona, Onfido, Sumsub) and store their inquiry/session id.
@@ -76,7 +133,6 @@ export async function submitKyc(req, res) {
   req.user.kycStatus = "pending";
   await req.user.save();
 
-  // TODO: call your KYC provider here and let their webhook flip kycStatus to "verified"/"rejected".
   res.json({ message: "Identity documents received. Verification is in progress.", kycStatus: "pending" });
 }
 

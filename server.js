@@ -29,6 +29,8 @@ app.post("/api/payments/stripe/webhook", express.raw({ type: "application/json" 
 app.use(express.json({ limit: "2mb" }));
 app.use(mongoSanitize());
 
+// General API limiter. Auth routes (login/register/password reset) have their own,
+// stricter limiter defined in authRoutes.js since they're the main brute-force surface.
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
 app.use("/api", limiter);
 
