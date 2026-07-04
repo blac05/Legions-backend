@@ -42,11 +42,13 @@ app.use("/api/payments", paymentRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
-
+// Completely portless, pipeless initialization using the Node.js event loop
 connectDB().then(() => {
-  app.listen(PORT, () => {
-    console.log(`[legion] API listening on port ${PORT}`);
-    startBreachMonitor();
-  });
+  console.log(`[legion] Backend successfully initialized in dynamic worker mode.`);
+  
+  // Directly boot your background job worker
+  startBreachMonitor();
+
+  // Keeps the Node.js process alive indefinitely so background tasks execute continuously
+  setInterval(() => {}, 1 << 30);
 });
