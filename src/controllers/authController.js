@@ -2,8 +2,12 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import User from "../models/User.js";
-import { generateTwoFASecret, generateQRCode, verifyTwoFAToken, generateBackupCodes } from "../utils/twoFactor.js";
-import { sendPasswordResetEmail } from "../utils/email.js";
+import {
+  generateTwoFASecret, generateQRCode, verifyTwoFAToken,
+  generateBackupCodes, findMatchingBackupCode,
+} from "../utils/twoFactor.js";
+import { sendPasswordResetEmail, sendVerificationEmail } from "../utils/email.js";
+import { uploadKycDocument } from "../utils/cloudinary.js";
 
 function signToken(userId) {
   return jwt.sign({ sub: userId }, process.env.JWT_SECRET, {
@@ -14,6 +18,21 @@ function signToken(userId) {
 function isAdminEmail(email) {
   const list = (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   return list.includes(email.toLowerCase());
+}
+
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+async function issueEmailVerification(user) {
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  user.emailVerificationTokenHash = hashToken(rawToken);
+  user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  await user.save();
+
+  const verifyUrl = `${process.env.CLIENT_URL || "http://localhost:5173"}/verify-email?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+  await sendVerificationEmail(user, verifyUrl);
+  return { rawToken, verifyUrl };
 }
 
 // POST /api/auth/register
@@ -35,25 +54,40 @@ export async function register(req, res) {
     role: isAdminEmail(email) ? "agent_admin" : "user",
   });
 
+  const { rawToken, verifyUrl } = await issueEmailVerification(user);
+
   const token = signToken(user._id);
-  res.status(201).json({ token, user: user.toSafeJSON() });
+  const response = { token, user: user.toSafeJSON() };
+  if (process.env.NODE_ENV !== "production") {
+    response.devEmailVerificationToken = rawToken;
+    response.devEmailVerificationUrl = verifyUrl;
+  }
+  res.status(201).json(response);
 }
 
 // POST /api/auth/login
 export async function login(req, res) {
-  const { email, password, twoFAToken } = req.body;
-  const user = await User.findOne({ email: (email || "").toLowerCase() }).select("+twoFA.secret");
+  const { email, password, twoFAToken, backupCode } = req.body;
+  const user = await User.findOne({ email: (email || "").toLowerCase() }).select("+twoFA.secret +twoFA.backupCodes");
   if (!user) return res.status(401).json({ error: "Invalid email or password" });
 
   const valid = await bcrypt.compare(password || "", user.passwordHash);
   if (!valid) return res.status(401).json({ error: "Invalid email or password" });
 
   if (user.twoFA?.enabled) {
-    if (!twoFAToken) {
-      return res.status(206).json({ requiresTwoFA: true, message: "Enter your 2FA code to continue" });
+    if (backupCode) {
+      const match = findMatchingBackupCode(user.twoFA.backupCodes, backupCode);
+      if (!match) return res.status(401).json({ error: "Invalid or already-used backup code" });
+      match.used = true;
+      match.usedAt = new Date();
+      await user.save();
+    } else if (twoFAToken) {
+      const ok = verifyTwoFAToken(user.twoFA.secret, twoFAToken);
+      if (!ok) return res.status(401).json({ error: "Invalid 2FA code" });
+    } else {
+      const remainingBackupCodes = (user.twoFA.backupCodes || []).filter((c) => !c.used).length;
+      return res.status(206).json({ requiresTwoFA: true, remainingBackupCodes, message: "Enter your 2FA code to continue" });
     }
-    const ok = verifyTwoFAToken(user.twoFA.secret, twoFAToken);
-    if (!ok) return res.status(401).json({ error: "Invalid 2FA code" });
   }
 
   const token = signToken(user._id);
@@ -65,7 +99,41 @@ export async function me(req, res) {
   res.json({ user: req.user.toSafeJSON() });
 }
 
-// POST /api/auth/password/forgot
+// POST /api/auth/email/verify  { email, token }
+export async function verifyEmail(req, res) {
+  const { email, token } = req.body;
+  if (!email || !token) return res.status(400).json({ error: "Email and token are required" });
+
+  const user = await User.findOne({
+    email: email.toLowerCase(),
+    emailVerificationTokenHash: hashToken(token),
+    emailVerificationExpires: { $gt: new Date() },
+  }).select("+emailVerificationTokenHash +emailVerificationExpires");
+
+  if (!user) return res.status(400).json({ error: "This verification link is invalid or has expired" });
+
+  user.emailVerified = true;
+  user.emailVerificationTokenHash = undefined;
+  user.emailVerificationExpires = undefined;
+  await user.save();
+
+  res.json({ message: "Email verified", user: user.toSafeJSON() });
+}
+
+// POST /api/auth/email/resend  (authenticated)
+export async function resendVerificationEmail(req, res) {
+  if (req.user.emailVerified) return res.json({ message: "Your email is already verified." });
+
+  const { rawToken, verifyUrl } = await issueEmailVerification(req.user);
+  const response = { message: "Verification email sent." };
+  if (process.env.NODE_ENV !== "production") {
+    response.devEmailVerificationToken = rawToken;
+    response.devEmailVerificationUrl = verifyUrl;
+  }
+  res.json(response);
+}
+
+// POST /api/auth/password/forgot  { email }
 export async function forgotPassword(req, res) {
   const { email } = req.body;
   const genericResponse = { message: "If an account exists for that email, a reset link has been sent." };
@@ -75,8 +143,8 @@ export async function forgotPassword(req, res) {
   if (!user) return res.json(genericResponse);
 
   const rawToken = crypto.randomBytes(32).toString("hex");
-  user.passwordResetTokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
-  user.passwordResetExpires = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+  user.passwordResetTokenHash = hashToken(rawToken);
+  user.passwordResetExpires = new Date(Date.now() + 30 * 60 * 1000);
   await user.save();
 
   const resetUrl = `${process.env.CLIENT_URL || "http://localhost:5173"}/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
@@ -90,7 +158,7 @@ export async function forgotPassword(req, res) {
   res.json(response);
 }
 
-// POST /api/auth/password/reset
+// POST /api/auth/password/reset  { email, token, password }
 export async function resetPassword(req, res) {
   const { email, token, password } = req.body;
   if (!email || !token || !password) {
@@ -100,10 +168,9 @@ export async function resetPassword(req, res) {
     return res.status(400).json({ error: "Password must be at least 10 characters" });
   }
 
-  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const user = await User.findOne({
     email: email.toLowerCase(),
-    passwordResetTokenHash: tokenHash,
+    passwordResetTokenHash: hashToken(token),
     passwordResetExpires: { $gt: new Date() },
   }).select("+passwordResetTokenHash +passwordResetExpires");
 
@@ -117,10 +184,27 @@ export async function resetPassword(req, res) {
   res.json({ message: "Password updated. You can now log in with your new password." });
 }
 
-// POST /api/auth/kyc
+// POST /api/auth/kyc  (multipart form: idType, country, document)
+// The document arrives in memory (see authRoutes.js's multer config) and is
+// streamed straight to Cloudinary - never written to local disk, which is
+// ephemeral on Render and similar platforms. In production, consider replacing
+// this whole flow with a licensed KYC/AML provider (Persona, Onfido, Sumsub)
+// that also handles the document storage and liveness check for you.
 export async function submitKyc(req, res) {
   const { idType, country } = req.body;
-  const documentUrl = req.file ? `/uploads/${req.file.filename}` : null;
+
+  let documentUrl = req.user.idDocumentUrl;
+  if (req.file) {
+    try {
+      const result = await uploadKycDocument(req.file.buffer, {
+        publicId: `${req.user._id}-${Date.now()}`,
+      });
+      documentUrl = result.secure_url;
+    } catch (err) {
+      console.error("[legion] Cloudinary upload failed:", err.message);
+      return res.status(502).json({ error: "Couldn't upload your document right now. Please try again." });
+    }
+  }
 
   req.user.idType = idType;
   req.user.country = country;
@@ -131,7 +215,7 @@ export async function submitKyc(req, res) {
   res.json({ message: "Identity documents received. Verification is in progress.", kycStatus: "pending" });
 }
 
-// POST /api/auth/kyc/webhook
+// POST /api/auth/kyc/webhook  - called by your KYC provider when a check completes
 export async function kycWebhook(req, res) {
   const { userId, status, providerRef } = req.body;
   const user = await User.findById(userId);
@@ -154,7 +238,7 @@ export async function setupTwoFA(req, res) {
   res.json({ qrCode, manualEntryKey: secret.base32 });
 }
 
-// POST /api/auth/2fa/verify
+// POST /api/auth/2fa/verify  { token }
 export async function verifyAndEnableTwoFA(req, res) {
   const user = await User.findById(req.user._id).select("+twoFA.secret");
   const { token } = req.body;
@@ -163,15 +247,15 @@ export async function verifyAndEnableTwoFA(req, res) {
   const ok = verifyTwoFAToken(user.twoFA.secret, token);
   if (!ok) return res.status(400).json({ error: "Invalid code, please try again" });
 
-  const backupCodes = generateBackupCodes();
+  const { raw, stored } = generateBackupCodes();
   user.twoFA.enabled = true;
-  user.twoFA.backupCodes = backupCodes;
+  user.twoFA.backupCodes = stored;
   await user.save();
 
-  res.json({ message: "Two-factor authentication enabled", backupCodes });
+  res.json({ message: "Two-factor authentication enabled", backupCodes: raw });
 }
 
-// POST /api/auth/2fa/challenge
+// POST /api/auth/2fa/challenge  { token }
 export async function challengeTwoFA(req, res) {
   const user = await User.findById(req.user._id).select("+twoFA.secret");
   const { token } = req.body;
@@ -183,53 +267,18 @@ export async function challengeTwoFA(req, res) {
   res.json({ verified: true });
 }
 
-// POST /api/auth/2fa/regenerate-codes
+// POST /api/auth/2fa/backup-codes/regenerate  { token }
 export async function regenerateBackupCodes(req, res) {
-  try {
-    // TODO: Implement user doc synchronization logic here
-    return res.status(200).json({
-      success: true,
-      message: "Backup codes regenerated successfully.",
-      backupCodes: ["XXXX-XXXX", "YYYY-YYYY", "ZZZZ-ZZZZ"]
-    });
-  } catch (error) {
-    console.error("Backup codes regeneration error:", error);
-    return res.status(500).json({ error: "Server error." });
+  const user = await User.findById(req.user._id).select("+twoFA.secret");
+  const { token } = req.body;
+  if (!user.twoFA?.enabled) return res.status(400).json({ error: "2FA is not enabled on this account" });
+  if (!token || !verifyTwoFAToken(user.twoFA.secret, token)) {
+    return res.status(401).json({ error: "A valid 2FA code is required to regenerate backup codes" });
   }
-}
 
-// POST /api/auth/verification/resend
-export async function resendVerificationEmail(req, res) {
-  try {
-    const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" });
-    }
-    // TODO: Verify account email verification flag state and dispatch link
-    return res.status(200).json({
-      success: true,
-      message: "If the account exists and is unverified, a new link has been sent."
-    });
-  } catch (error) {
-    console.error("Resend verification email error:", error);
-    return res.status(500).json({ error: "Server error." });
-  }
-}
-// GET /api/auth/verification/verify?token=...
-export async function verifyEmail(req, res) {
-  try {
-    const { token } = req.query;
-    if (!token) {
-      return res.status(400).json({ error: "Verification token is required" });
-    }
+  const { raw, stored } = generateBackupCodes();
+  user.twoFA.backupCodes = stored;
+  await user.save();
 
-    // TODO: Hash incoming token, look up user, flip emailVerified flag to true
-    return res.status(200).json({
-      success: true,
-      message: "Email verified successfully! You can now log in."
-    });
-  } catch (error) {
-    console.error("Email verification error:", error);
-    return res.status(500).json({ error: "Server error." });
-  }
+  res.json({ backupCodes: raw });
 }
