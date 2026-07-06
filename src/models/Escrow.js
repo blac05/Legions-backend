@@ -15,8 +15,16 @@ const milestoneSchema = new mongoose.Schema(
     title: { type: String, required: true },
     amount: { type: Number, required: true, min: 0 },
     conditions: { type: [conditionSchema], default: [] },
-    released: { type: Boolean, default: false },
+
+    released: { type: Boolean, default: false }, // funds went (fully or partially) to the beneficiary
     releasedAt: { type: Date },
+
+    refunded: { type: Boolean, default: false }, // funds went (fully or partially) back to the depositor
+    refundedAt: { type: Date },
+
+    // Set only when this milestone's funds were divided by a dispute resolution -
+    // e.g. 60 means 60% went to the beneficiary and 40% back to the depositor.
+    splitPercent: { type: Number, min: 0, max: 100 },
   },
   { _id: true }
 );
@@ -34,7 +42,7 @@ const partySchema = new mongoose.Schema(
 
 const escrowSchema = new mongoose.Schema(
   {
-    legionId: { type: String, required: true, unique: true }, // e.g. LGN-88213
+    legionId: { type: String, required: true, unique: true },
     title: { type: String, required: true },
     description: { type: String },
 
@@ -47,7 +55,7 @@ const escrowSchema = new mongoose.Schema(
       validate: (v) => v.length > 0,
     },
 
-    agentFeeRate: { type: Number, required: true }, // e.g. 0.015, computed on total amount
+    agentFeeRate: { type: Number, required: true },
     agentFeeAmount: { type: Number, required: true },
     feeSplit: { type: String, enum: ["even", "depositor", "beneficiary"], default: "even" },
 
