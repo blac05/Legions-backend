@@ -8,7 +8,18 @@ import {
   forgotPassword, resetPassword, verifyEmail, resendVerificationEmail,
 } from "../controllers/authController.js";
 
-const upload = multer({ dest: "uploads/" });
+// Files are held in memory only, then streamed straight to Cloudinary
+// (src/utils/cloudinary.js) - never written to local disk, which is ephemeral
+// on Render and similar platforms.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+    cb(allowed.includes(file.mimetype) ? null : new Error("Only JPG, PNG, WEBP or PDF files are allowed"), allowed.includes(file.mimetype));
+  },
+});
+
 const router = express.Router();
 
 const credentialLimiter = rateLimit({
@@ -29,7 +40,7 @@ router.get("/me", requireAuth, me);
 router.post("/email/resend", requireAuth, credentialLimiter, resendVerificationEmail);
 
 router.post("/kyc", requireAuth, upload.single("document"), submitKyc);
-router.post("/kyc/webhook", kycWebhook); // called by your KYC provider, not the frontend
+router.post("/kyc/webhook", kycWebhook);
 
 router.post("/2fa/setup", requireAuth, setupTwoFA);
 router.post("/2fa/verify", requireAuth, verifyAndEnableTwoFA);
