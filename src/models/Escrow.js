@@ -16,14 +16,12 @@ const milestoneSchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 0 },
     conditions: { type: [conditionSchema], default: [] },
 
-    released: { type: Boolean, default: false }, // funds went (fully or partially) to the beneficiary
+    released: { type: Boolean, default: false },
     releasedAt: { type: Date },
 
-    refunded: { type: Boolean, default: false }, // funds went (fully or partially) back to the depositor
+    refunded: { type: Boolean, default: false },
     refundedAt: { type: Date },
 
-    // Set only when this milestone's funds were divided by a dispute resolution -
-    // e.g. 60 means 60% went to the beneficiary and 40% back to the depositor.
     splitPercent: { type: Number, min: 0, max: 100 },
   },
   { _id: true }
@@ -75,6 +73,14 @@ const escrowSchema = new mongoose.Schema(
     disputed: { type: Boolean, default: false },
     disputeReason: { type: String },
     disputeRaisedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    // Cancellation is only available before funds have moved. A single party can
+    // cancel outright while the contract is still pending_agreement (nothing was
+    // ever mutually finalized); once both parties have agreed but funds haven't
+    // landed yet, cancellation requires the other party to confirm.
+    cancellationRequestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    cancellationRequestedAt: { type: Date },
+    cancelledAt: { type: Date },
   },
   { timestamps: true }
 );
