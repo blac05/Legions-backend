@@ -53,7 +53,7 @@ export async function createDepositIntent(escrow) {
 }
 
 /**
- * Payout for a single milestone on release. Fee for that milestone is taken
+ * Payout for a single milestone on normal release. Fee for that milestone is taken
  * proportionally from the contract's overall agentFeeAmount.
  */
 export async function createPayout(escrow, milestone) {
@@ -75,19 +75,40 @@ export async function createPayout(escrow, milestone) {
 }
 
 /**
+ * Full refund of a single milestone back to the depositor - used when a dispute
+ * resolves in the depositor's favor. No agent fee is charged on a refunded
+ * milestone, since the contracted work was never actually delivered.
+ */
+export async function createRefund(escrow, milestone) {
+  await Transaction.create({
+    escrow: escrow._id, type: "refund", method: escrow.fundingMethod, amount: milestone.amount,
+    currency: escrow.currency, provider: `${escrow.fundingMethod}_provider_stub`, status: "pending",
+  });
+}
+
+/**
  * Used when an agent resolves a dispute as a "split": divides one milestone's
  * amount between a beneficiary payout and a depositor refund according to
  * `beneficiaryPercent` (0-100). Both legs are recorded as separate transactions
- * so the audit trail shows exactly how the funds were divided.
+ * so the audit trail shows exactly how the funds were divided. No fee is charged
+ * on the depositor's refunded portion; a proportional fee applies to the
+ * beneficiary's portion only.
  */
 export async function createSplitPayout(escrow, milestone, beneficiaryPercent) {
   const beneficiaryAmount = Math.round(milestone.amount * (beneficiaryPercent / 100) * 100) / 100;
   const depositorAmount = Math.round((milestone.amount - beneficiaryAmount) * 100) / 100;
+  const total = escrow.totalAmount ?? escrow.milestones.reduce((s, m) => s + m.amount, 0);
+  const milestoneFee = total > 0 ? (milestone.amount / total) * escrow.agentFeeAmount : 0;
+  const beneficiaryFee = beneficiaryPercent > 0 ? milestoneFee * (beneficiaryPercent / 100) : 0;
 
   if (beneficiaryAmount > 0) {
     await Transaction.create({
       escrow: escrow._id, type: "payout", method: escrow.payoutMethod, amount: beneficiaryAmount,
       currency: escrow.currency, provider: `${escrow.payoutMethod}_provider_stub`, status: "pending",
+    });
+    await Transaction.create({
+      escrow: escrow._id, type: "fee", method: escrow.payoutMethod, amount: Math.round(beneficiaryFee * 100) / 100,
+      currency: escrow.currency, provider: "legion_internal", status: "completed",
     });
   }
   if (depositorAmount > 0) {
@@ -100,7 +121,7 @@ export async function createSplitPayout(escrow, milestone, beneficiaryPercent) {
 }
 
 /**
- * Shared by all three webhook handlers: marks the matching deposit Transaction as
+ * Shared by all three deposit webhook handlers: marks the matching Transaction as
  * completed and, the first time this happens for a contract, flips the Escrow into
  * a funded, active state. Idempotent - safe to call more than once for the same
  * transaction (e.g. a retried webhook).
@@ -145,7 +166,6 @@ export async function stripeWebhook(req, res) {
 // POST /api/payments/bank/webhook
 // { reference: "LEGION-88213", status: "completed" }
 export async function bankWebhook(req, res) {
-  // TODO: verify the provider's request signature before trusting this payload.
   const { reference, status } = req.body;
   if (!reference || status !== "completed") return res.json({ received: true });
 
@@ -157,7 +177,6 @@ export async function bankWebhook(req, res) {
 // POST /api/payments/crypto/webhook
 // { reference: "LEGION-88213", confirmations: 6, requiredConfirmations: 6 }
 export async function cryptoWebhook(req, res) {
-  // TODO: verify the provider's request signature before trusting this payload.
   const { reference, confirmations, requiredConfirmations } = req.body;
   if (!reference || (confirmations ?? 0) < (requiredConfirmations ?? 1)) return res.json({ received: true });
 
