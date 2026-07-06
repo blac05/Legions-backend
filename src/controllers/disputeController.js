@@ -1,6 +1,6 @@
 import Dispute from "../models/Dispute.js";
 import Escrow from "../models/Escrow.js";
-import { createPayout, createSplitPayout } from "./paymentController.js";
+import { createPayout, createRefund, createSplitPayout } from "./paymentController.js";
 
 // GET /api/disputes  (agent_admin only)
 export async function listDisputes(req, res) {
@@ -21,10 +21,23 @@ export async function listMyDisputes(req, res) {
   res.json({ disputes });
 }
 
+function settleFinalStatus(escrow) {
+  const allSettled = escrow.milestones.every((m) => m.released || m.refunded);
+  if (!allSettled) {
+    escrow.status = "active";
+    return;
+  }
+  const anyReleased = escrow.milestones.some((m) => m.released);
+  const anyRefunded = escrow.milestones.some((m) => m.refunded);
+  // If every milestone ended up refunded with nothing released, the contract is
+  // "refunded"; otherwise (all released, or a mix from a split) it's "completed".
+  escrow.status = anyReleased || !anyRefunded ? "completed" : "refunded";
+}
+
 // POST /api/disputes/:id/resolve  (agent_admin only)
 // body: { resolution: "release_to_beneficiary" | "refund_depositor" | "split", notes, splitPercent }
-// splitPercent (0-100) is the share that goes to the beneficiary; only used when resolution === "split".
-// Applies to all currently-unreleased milestones on the contract.
+// splitPercent (0-100) is the beneficiary's share; only used when resolution === "split".
+// Applies to every currently unsettled (not yet released or refunded) milestone.
 export async function resolveDispute(req, res) {
   const { resolution, notes, splitPercent } = req.body;
   if (!["release_to_beneficiary", "refund_depositor", "split"].includes(resolution)) {
@@ -49,30 +62,33 @@ export async function resolveDispute(req, res) {
   await dispute.save();
 
   escrow.disputed = false;
-  const unreleased = escrow.milestones.filter((m) => !m.released);
+  const unsettled = escrow.milestones.filter((m) => !m.released && !m.refunded);
 
   if (resolution === "release_to_beneficiary") {
-    for (const m of unreleased) {
+    for (const m of unsettled) {
       await createPayout(escrow, m);
       m.released = true;
       m.releasedAt = new Date();
     }
-    escrow.status = escrow.milestones.every((m) => m.released) ? "completed" : "active";
   } else if (resolution === "refund_depositor") {
-    escrow.status = "refunded";
-    // TODO: trigger an actual refund of the unreleased milestone totals through
-    // whichever provider handled the deposit (Stripe refund, bank reversal, etc).
+    for (const m of unsettled) {
+      await createRefund(escrow, m);
+      m.refunded = true;
+      m.refundedAt = new Date();
+    }
   } else {
-    // split: divide each unreleased milestone between beneficiary and depositor.
     const pct = Number(splitPercent);
-    for (const m of unreleased) {
+    for (const m of unsettled) {
       await createSplitPayout(escrow, m, pct);
       m.released = true;
       m.releasedAt = new Date();
+      m.refunded = true;
+      m.refundedAt = new Date();
       m.splitPercent = pct;
     }
-    escrow.status = escrow.milestones.every((m) => m.released) ? "completed" : "active";
   }
+
+  settleFinalStatus(escrow);
   await escrow.save();
 
   res.json({ dispute, escrow });
