@@ -101,10 +101,18 @@ async function requireParty(req, res) {
   return escrow;
 }
 
+function isPartyUserId(escrow, userId) {
+  const uid = userId.toString();
+  if (escrow.depositor.user?.toString() === uid) return "depositor";
+  if (escrow.beneficiary.user?.toString() === uid) return "beneficiary";
+  return null;
+}
+
 // POST /api/escrows/:id/agree
 export async function agreeToEscrow(req, res) {
   const escrow = await requireParty(req, res);
   if (!escrow) return;
+  if (escrow.status === "cancelled") return res.status(400).json({ error: "This contract has been cancelled" });
 
   const uid = req.user._id.toString();
   if (escrow.depositor.email === req.user.email || escrow.depositor.user?.toString() === uid) {
@@ -130,9 +138,11 @@ export async function toggleCondition(req, res) {
   const escrow = await requireParty(req, res);
   if (!escrow) return;
   if (escrow.disputed) return res.status(400).json({ error: "Contract is under dispute review; conditions are locked" });
+  if (escrow.status === "cancelled") return res.status(400).json({ error: "This contract has been cancelled" });
 
   const milestone = escrow.milestones.id(req.params.milestoneId);
   if (!milestone) return res.status(404).json({ error: "Milestone not found" });
+  if (milestone.released || milestone.refunded) return res.status(400).json({ error: "This milestone has already been settled" });
   const condition = milestone.conditions.id(req.params.conditionId);
   if (!condition) return res.status(404).json({ error: "Condition not found" });
 
@@ -149,10 +159,12 @@ export async function releaseMilestone(req, res) {
   const escrow = await requireParty(req, res);
   if (!escrow) return;
   if (escrow.disputed) return res.status(400).json({ error: "Funds are locked while this contract is under dispute review" });
+  if (escrow.status === "cancelled") return res.status(400).json({ error: "This contract has been cancelled" });
 
   const milestone = escrow.milestones.id(req.params.milestoneId);
   if (!milestone) return res.status(404).json({ error: "Milestone not found" });
   if (milestone.released) return res.status(400).json({ error: "This milestone has already been released" });
+  if (milestone.refunded) return res.status(400).json({ error: "This milestone was already resolved as a refund and can't be released" });
 
   const allMet = milestone.conditions.length > 0 && milestone.conditions.every((c) => c.met);
   if (!allMet) return res.status(400).json({ error: "All conditions for this milestone must be met before release" });
@@ -181,6 +193,7 @@ export async function releaseMilestone(req, res) {
 export async function flagBreach(req, res) {
   const escrow = await requireParty(req, res);
   if (!escrow) return;
+  if (escrow.status === "cancelled") return res.status(400).json({ error: "This contract has been cancelled" });
   const { reason, milestoneId } = req.body;
   if (!reason) return res.status(400).json({ error: "Please describe the breach" });
 
@@ -198,5 +211,70 @@ export async function flagBreach(req, res) {
     status: "open",
   });
 
+  res.json({ escrow });
+}
+
+// POST /api/escrows/:id/cancel
+// Cancellation is only available before funds have landed:
+//  - while still pending_agreement, either party can cancel outright (nothing
+//    was ever mutually finalized, so there's no one else's consent needed)
+//  - once both parties have agreed but the contract isn't funded yet, the first
+//    party's request needs the other party to confirm before it's final
+// No agent fee applies either way, matching the fee schedule's promise that
+// cancelled, unfunded contracts are never charged.
+export async function requestCancellation(req, res) {
+  const escrow = await requireParty(req, res);
+  if (!escrow) return;
+
+  if (escrow.fundedAt) {
+    return res.status(400).json({ error: "This contract has already been funded and can't be cancelled directly — open a dispute instead" });
+  }
+  if (!["pending_agreement", "active"].includes(escrow.status)) {
+    return res.status(400).json({ error: "This contract can no longer be cancelled" });
+  }
+
+  const partyRole = isPartyUserId(escrow, req.user._id);
+  if (!partyRole) return res.status(403).json({ error: "You are not a party to this contract" });
+
+  if (escrow.status === "pending_agreement") {
+    escrow.status = "cancelled";
+    escrow.cancelledAt = new Date();
+    await escrow.save();
+    return res.json({ escrow, message: "Contract cancelled." });
+  }
+
+  // status === "active" and unfunded: requires mutual confirmation
+  if (!escrow.cancellationRequestedBy) {
+    escrow.cancellationRequestedBy = req.user._id;
+    escrow.cancellationRequestedAt = new Date();
+    await escrow.save();
+    return res.json({ escrow, message: "Cancellation requested. Waiting for the other party to confirm." });
+  }
+
+  if (escrow.cancellationRequestedBy.toString() === req.user._id.toString()) {
+    return res.status(400).json({ error: "You've already requested cancellation — waiting on the other party to confirm." });
+  }
+
+  // The other party is confirming.
+  escrow.status = "cancelled";
+  escrow.cancelledAt = new Date();
+  await escrow.save();
+  res.json({ escrow, message: "Contract cancelled by mutual agreement." });
+}
+
+// POST /api/escrows/:id/cancel/withdraw
+// Either the original requester can rescind their own request, or the other
+// party can decline it - either way it just clears the pending request.
+export async function withdrawCancellation(req, res) {
+  const escrow = await requireParty(req, res);
+  if (!escrow) return;
+
+  if (!escrow.cancellationRequestedBy) {
+    return res.status(400).json({ error: "There's no pending cancellation request on this contract" });
+  }
+
+  escrow.cancellationRequestedBy = undefined;
+  escrow.cancellationRequestedAt = undefined;
+  await escrow.save();
   res.json({ escrow });
 }
