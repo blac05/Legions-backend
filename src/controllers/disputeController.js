@@ -1,6 +1,7 @@
 import Dispute from "../models/Dispute.js";
 import Escrow from "../models/Escrow.js";
 import { createPayout, createRefund, createSplitPayout } from "./paymentController.js";
+import { notifyDisputeResolved } from "../utils/notify.js";
 
 // GET /api/disputes  (agent_admin only)
 export async function listDisputes(req, res) {
@@ -29,15 +30,11 @@ function settleFinalStatus(escrow) {
   }
   const anyReleased = escrow.milestones.some((m) => m.released);
   const anyRefunded = escrow.milestones.some((m) => m.refunded);
-  // If every milestone ended up refunded with nothing released, the contract is
-  // "refunded"; otherwise (all released, or a mix from a split) it's "completed".
   escrow.status = anyReleased || !anyRefunded ? "completed" : "refunded";
 }
 
 // POST /api/disputes/:id/resolve  (agent_admin only)
 // body: { resolution: "release_to_beneficiary" | "refund_depositor" | "split", notes, splitPercent }
-// splitPercent (0-100) is the beneficiary's share; only used when resolution === "split".
-// Applies to every currently unsettled (not yet released or refunded) milestone.
 export async function resolveDispute(req, res) {
   const { resolution, notes, splitPercent } = req.body;
   if (!["release_to_beneficiary", "refund_depositor", "split"].includes(resolution)) {
@@ -90,6 +87,8 @@ export async function resolveDispute(req, res) {
 
   settleFinalStatus(escrow);
   await escrow.save();
+
+  await notifyDisputeResolved(escrow, resolution);
 
   res.json({ dispute, escrow });
 }
