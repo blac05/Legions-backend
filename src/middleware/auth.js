@@ -1,5 +1,6 @@
+// routes/auth.js
 import express from 'express';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
 
 const router = express.Router();
@@ -8,22 +9,18 @@ router.post('/auth/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Validate input
     if (!username || !email || !password) {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
-    // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({ error: 'Email already in use' });
     }
 
-    // Hash password
     const saltRounds = 10;
     const passwordHash = await bcrypt.hash(password, saltRounds);
 
-    // Create user
     const newUser = new User({
       username,
       email,
@@ -39,4 +36,8 @@ router.post('/auth/register', async (req, res) => {
   }
 });
 
+// middleware/auth.js
+export function requireAuth(req, res, next) {
+  // your middleware logic
+}
 export default router;

@@ -14,6 +14,8 @@ import authRoutes from "./src/routes/authRoutes.js";
 import escrowRoutes from "./src/routes/escrowRoutes.js";
 import disputeRoutes from "./src/routes/disputeRoutes.js";
 import paymentRoutes from "./src/routes/paymentRoutes.js";
+import { requireAuth } from "./src/middleware/authMiddleware.js";
+
 
 dotenv.config();
 
@@ -40,6 +42,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/escrows", escrowRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use(requireAuth); // Protect all routes below this line with authentication
 
 app.use(notFound);
 app.use(errorHandler);
