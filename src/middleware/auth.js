@@ -1,45 +1,42 @@
-import jwt from "jsonwebtoken";
-import User from "../models/User.js";
+import express from 'express';
+import bcrypt from 'bcrypt';
+import User from '../models/User.js';
 
-export async function requireAuth(req, res, next) {
+const router = express.Router();
+
+router.post('/auth/register', async (req, res) => {
   try {
-    const header = req.headers.authorization || "";
-    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-    if (!token) return res.status(401).json({ error: "Missing authentication token" });
+    const { username, email, password } = req.body;
 
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(payload.sub);
-    if (!user) return res.status(401).json({ error: "Invalid session" });
-
-    req.user = user;
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
-}
-
-export function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: "Not authorized for this action" });
+    // Validate input
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'All fields are required' });
     }
-    next();
-  };
-}
-// Add this to the bottom of src/middleware/auth.js
-export function requireVerifiedEmail(req, res, next) {
-  // requireAuth must run before this to populate req.user
-  if (!req.user) {
-    return res.status(401).json({ error: "Authentication required" });
-  }
 
-  // Check the email verification flag from your User Model
-  if (!req.user.emailVerified) {
-    return res.status(403).json({ 
-      error: "Your email address must be verified to perform this action.",
-      requiresVerification: true 
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({ error: 'Email already in use' });
+    }
+
+    // Hash password
+    const saltRounds = 10;
+    const passwordHash = await bcrypt.hash(password, saltRounds);
+
+    // Create user
+    const newUser = new User({
+      username,
+      email,
+      password: passwordHash,
     });
-  }
 
-  next();
-}
+    await newUser.save();
+
+    res.status(201).json({ message: 'Registration successful' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+export default router;
