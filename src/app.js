@@ -11,6 +11,7 @@ import authRoutes from "./routes/authRoutes.js";
 import escrowRoutes from "./routes/escrowRoutes.js";
 import disputeRoutes from "./routes/disputeRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
+import registrationRoutes from './routes/registration.js';
 
 /**
  * Builds the Express app without connecting to a database, starting the cron job,
@@ -42,6 +43,7 @@ export function createApp() {
   app.use("/api/escrows", escrowRoutes);
   app.use("/api/disputes", disputeRoutes);
   app.use("/api/payments", paymentRoutes);
+  app.use('/', registrationRoutes);
 
   app.use(notFound);
   app.use(errorHandler);
