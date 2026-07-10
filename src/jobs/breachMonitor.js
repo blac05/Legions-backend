@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import Escrow from "../models/Escrow.js";
 import Dispute from "../models/Dispute.js";
+import { notifyDisputeFlagged } from "../utils/notify.js";
 
 /**
  * The actual breach-detection logic, exported separately from the cron wrapper so
@@ -23,7 +24,7 @@ export async function checkAndFlagBreaches(now = new Date()) {
     const allDelivered = escrow.milestones.every(
       (m) => m.released || m.refunded || m.conditions.every((c) => c.met)
     );
-    if (allDelivered) continue; // deadline passed but everything was actually delivered
+    if (allDelivered) continue;
 
     escrow.disputed = true;
     escrow.disputeReason = "Automatically flagged: contract deadline passed with unmet milestone conditions.";
@@ -37,6 +38,8 @@ export async function checkAndFlagBreaches(now = new Date()) {
       status: "open",
       autoFlagged: true,
     });
+
+    await notifyDisputeFlagged(escrow, { autoFlagged: true });
 
     flagged.push(escrow.legionId);
   }
