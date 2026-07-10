@@ -4,6 +4,10 @@ import User from "../models/User.js";
 import { calculateFee } from "../utils/fees.js";
 import { verifyTwoFAToken } from "../utils/twoFactor.js";
 import { createDepositIntent, createPayout } from "./paymentController.js";
+import {
+  notifyContractInvite, notifyContractActive, notifyMilestoneReleased,
+  notifyDisputeFlagged, notifyCancellationRequested, notifyCancelled,
+} from "../utils/notify.js";
 
 function generateLegionId() {
   return "LGN-" + Math.floor(10000 + Math.random() * 89999);
@@ -63,6 +67,8 @@ export async function createEscrow(req, res) {
     deadline: deadline ? new Date(deadline) : undefined,
     status: "pending_agreement",
   });
+
+  await notifyContractInvite(escrow);
 
   res.status(201).json({ escrow });
 }
@@ -125,11 +131,16 @@ export async function agreeToEscrow(req, res) {
     escrow.beneficiary.user = req.user._id;
   }
 
+  let justBecameActive = false;
   if (escrow.depositor.agreed && escrow.beneficiary.agreed && escrow.status === "pending_agreement") {
     escrow.status = "active";
+    justBecameActive = true;
     await createDepositIntent(escrow);
   }
   await escrow.save();
+
+  if (justBecameActive) await notifyContractActive(escrow);
+
   res.json({ escrow });
 }
 
@@ -186,6 +197,8 @@ export async function releaseMilestone(req, res) {
   }
   await escrow.save();
 
+  await notifyMilestoneReleased(escrow, milestone);
+
   res.json({ escrow });
 }
 
@@ -211,17 +224,12 @@ export async function flagBreach(req, res) {
     status: "open",
   });
 
+  await notifyDisputeFlagged(escrow);
+
   res.json({ escrow });
 }
 
 // POST /api/escrows/:id/cancel
-// Cancellation is only available before funds have landed:
-//  - while still pending_agreement, either party can cancel outright (nothing
-//    was ever mutually finalized, so there's no one else's consent needed)
-//  - once both parties have agreed but the contract isn't funded yet, the first
-//    party's request needs the other party to confirm before it's final
-// No agent fee applies either way, matching the fee schedule's promise that
-// cancelled, unfunded contracts are never charged.
 export async function requestCancellation(req, res) {
   const escrow = await requireParty(req, res);
   if (!escrow) return;
@@ -240,14 +248,15 @@ export async function requestCancellation(req, res) {
     escrow.status = "cancelled";
     escrow.cancelledAt = new Date();
     await escrow.save();
+    await notifyCancelled(escrow);
     return res.json({ escrow, message: "Contract cancelled." });
   }
 
-  // status === "active" and unfunded: requires mutual confirmation
   if (!escrow.cancellationRequestedBy) {
     escrow.cancellationRequestedBy = req.user._id;
     escrow.cancellationRequestedAt = new Date();
     await escrow.save();
+    await notifyCancellationRequested(escrow, partyRole);
     return res.json({ escrow, message: "Cancellation requested. Waiting for the other party to confirm." });
   }
 
@@ -255,16 +264,14 @@ export async function requestCancellation(req, res) {
     return res.status(400).json({ error: "You've already requested cancellation — waiting on the other party to confirm." });
   }
 
-  // The other party is confirming.
   escrow.status = "cancelled";
   escrow.cancelledAt = new Date();
   await escrow.save();
+  await notifyCancelled(escrow);
   res.json({ escrow, message: "Contract cancelled by mutual agreement." });
 }
 
 // POST /api/escrows/:id/cancel/withdraw
-// Either the original requester can rescind their own request, or the other
-// party can decline it - either way it just clears the pending request.
 export async function withdrawCancellation(req, res) {
   const escrow = await requireParty(req, res);
   if (!escrow) return;
